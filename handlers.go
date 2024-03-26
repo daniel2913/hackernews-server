@@ -12,10 +12,10 @@ import (
 func SPAHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Add("Cache-Control", "max-age=24939360")
 	if len(strings.Split(r.URL.Path, ".")) > 1 {
-		http.ServeFileFS(w, r, app, "client/src/dist"+r.URL.Path)
+		http.ServeFileFS(w, r, app, "dist"+r.URL.Path)
 		return
 	}
-	http.ServeFileFS(w, r, app, "client/src/dist/index.html")
+	http.ServeFileFS(w, r, app, "dist/index.html")
 }
 
 func getFullStoryHandler(w http.ResponseWriter, r *http.Request, ctx context.Context) {

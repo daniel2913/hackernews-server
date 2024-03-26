@@ -4,24 +4,15 @@ import (
 	"context"
 	"embed"
 	"net/http"
-	"os"
 
 	"github.com/redis/go-redis/v9"
 )
-
-
-type Config struct {
-	RedisAddr string `json:"REDIS_ADDRESS"`
-	LolcaAddr string `json:"LOCAL_ADDRESS"`
-	GlobalAddr string `json:"GLOBAL_ADDRESS"`
-}
-
 
 var base = "https://hacker-news.firebaseio.com/v0/"
 var item = "item/"
 var ext = ".json"
 
-//go:embed client/src/dist/*
+//go:embed dist/*
 var app embed.FS
 
 func main() {
@@ -30,11 +21,7 @@ func main() {
 		Password: "",
 		DB:       0,
 	})
-	address := os.Getenv("API_ADDRESS")
-	if address == ""{
-		address = "localhost:3005"
-		os.Setenv("API_ADDRESS",address)
-	}
+
 	ctx := context.WithValue(context.Background(), "redis", redisClient)
 	server := http.Server{Addr: "localhost:3005"}
 

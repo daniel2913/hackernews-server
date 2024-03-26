@@ -36,17 +36,6 @@ func populateComments(ctx context.Context, ids []int) ([]Comment, error) {
 	return kids, nil
 }
 
-func PopulateCommentsRec(ctx context.Context, ids []int) {
-	comments, err := populateComments(ctx, ids)
-	if err != nil {
-		return
-	}
-	for _, comment := range comments {
-		go func() {
-			PopulateCommentsRec(ctx, comment.Kids)
-		}()
-	}
-}
 type withKids struct {
 	Kids []int `json:"kids"`
 }

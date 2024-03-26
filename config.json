@@ -1,6 +1,0 @@
-{
-	"LocalAddress":"localhost:3005",
-	"GlobalAddress":"localhost:3005",
-	"RedisAddress":"localhost:6379",
-	"RedisPassword":"",
-}
