@@ -2,76 +2,27 @@ package main
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
-	"io"
+	"embed"
 	"net/http"
-	"sync"
-	"time"
+	"os"
 
 	"github.com/redis/go-redis/v9"
 )
 
-var base = "https://hacker-news.firebaseio.com/v0/"
-var newIds = "newstories"
-var item = "item/"
 
+type Config struct {
+	RedisAddr string `json:"REDIS_ADDRESS"`
+	LolcaAddr string `json:"LOCAL_ADDRESS"`
+	GlobalAddr string `json:"GLOBAL_ADDRESS"`
+}
+
+
+var base = "https://hacker-news.firebaseio.com/v0/"
+var item = "item/"
 var ext = ".json"
 
-type ids []uint32
-
-func (this *ids) Write(targ io.Writer) (int, error) {
-	s, err := json.Marshal(this)
-	if err != nil {
-		return 0, err
-	}
-	return targ.Write(s)
-}
-
-func (this *ids) Read(src []byte) (int, error) {
-	err := json.Unmarshal(src, this)
-	if err != nil {
-		return 0, err
-	}
-	return len(src), nil
-}
-
-func fetchIds(ctx context.Context) ([]uint32, error) {
-	redisClient, ok := ctx.Value("redis").(*redis.Client)
-	if !ok {
-		fmt.Println(redisClient)
-		panic(":(")
-	}
-	data, err := redisClient.Get(ctx, "newIds").Result()
-	if err == nil {
-		var res ids
-		_, err = res.Read([]byte(data))
-		if err == nil {
-			return res, nil
-		}
-	}
-	req, err := http.Get(base + newIds + ext)
-	if err != nil {
-		return nil, err
-	}
-	body, err := io.ReadAll(req.Body)
-	if err != nil {
-		return nil, err
-	}
-	ids := make([]uint32, 0, 200)
-
-	err = json.Unmarshal(body, &ids)
-	if err != nil {
-		return nil, err
-	}
-	w, err := json.Marshal(ids)
-	if err == nil {
-		redisClient.Set(ctx, "newIds", string(w), time.Duration(1000*1000*1000*60))
-	} else {
-		println("Redit write error")
-	}
-	return ids, nil
-}
+//go:embed client/src/dist/*
+var app embed.FS
 
 func main() {
 	redisClient := redis.NewClient(&redis.Options{
@@ -79,32 +30,24 @@ func main() {
 		Password: "",
 		DB:       0,
 	})
+	address := os.Getenv("API_ADDRESS")
+	if address == ""{
+		address = "localhost:3005"
+		os.Setenv("API_ADDRESS",address)
+	}
 	ctx := context.WithValue(context.Background(), "redis", redisClient)
-	ids, err := fetchIds(ctx)
-	if err != nil {
-		panic("fetchIds")
-	}
-	res := make([]byte, 0, 102400)
-	res = append(res, '[')
-	cur := make(chan []byte)
-	wg := sync.WaitGroup{}
-	for _, id := range ids[0:99] {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			fetchItem(ctx, id, cur)
-		}()
-	}
-	go func() {
-		wg.Wait()
-		close(cur)
-	}()
-	for story := range cur {
-		println(story)
-		res = append(res, story...)
-		res = append(res, ',')
-	}
-	res = res[0 : len(res)-1]
-	res = append(res, ']')
-	fmt.Println(string(res))
+	server := http.Server{Addr: "localhost:3005"}
+
+	paths := []string{"newstories", "topstories", "beststories"}
+	generateHandlers(paths, ctx)
+
+	http.HandleFunc("INFO /*", contextHandler(corsHandler, ctx))
+
+	http.HandleFunc("GET /*", SPAHandler)
+
+	http.HandleFunc("GET /api/story/{id}", contextHandler(getFullStoryHandler, ctx))
+	http.HandleFunc("GET /api/comments/{id}", contextHandler(getCommentsHandler, ctx))
+	http.HandleFunc("POST /api/comments/{id}", contextHandler(updateCommentsHandler, ctx))
+	err := server.ListenAndServe()
+	println(err.Error())
 }
