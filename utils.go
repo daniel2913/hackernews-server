@@ -3,15 +3,16 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"github.com/rs/zerolog/log"
 )
 
 type Comment struct {
@@ -57,7 +58,7 @@ type MutexSlice[T any] struct {
 }
 
 func deleteFromCache(ids []int, ctx context.Context) {
-	redis := getRedis(ctx)
+	redis := mustGetRedis(ctx)
 	for _, id := range ids {
 		commentStr, err := redis.Get(ctx, fmt.Sprint(id)).Result()
 		if err != nil {
@@ -69,81 +70,85 @@ func deleteFromCache(ids []int, ctx context.Context) {
 			deleteFromCache(comment.Kids, ctx)
 		}
 		redis.Del(ctx, fmt.Sprint(comment.Id))
+		log.Debug().Msgf("item %d deleted from cache", id)
 	}
 }
 
-func contextHandler(fn func(w http.ResponseWriter, r *http.Request, ctx context.Context), ctx context.Context) func(w http.ResponseWriter, r *http.Request) {
+type ReqContext struct {
+	status int
+}
 
+func mustGetReqCtx(ctx context.Context) *ReqContext {
+	reqctx, ok := ctx.Value("pContext").(*ReqContext)
+	if !ok {
+		log.Panic().Caller(1).Msg("No Request Context in Context")
+	}
+	return reqctx
+}
+
+func contextHandler(fn func(w http.ResponseWriter, r *http.Request, ctx context.Context) error, ctx context.Context) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
+		reqctx := ReqContext{status: http.StatusTeapot}
+		ctx = context.WithValue(ctx, "pContext", &reqctx)
 		w.Header().Add("Access-Control-Allow-Origin", "*")
 		fn(w, r, ctx)
+		if reqctx.status == http.StatusTeapot {
+			log.Warn().Msgf("Request to %s returned default status", r.RequestURI)
+		}
+		if reqctx.status != -1 {
+			w.WriteHeader(reqctx.status)
+		}
+		return
+
 	}
 }
-func getRedis(ctx context.Context) *redis.Client {
+
+func mustGetRedis(ctx context.Context) *redis.Client {
 	redisClient, ok := ctx.Value("redis").(*redis.Client)
 	if !ok {
-		panic("Redis not available!")
+		log.Panic().Msg("Redis not in context!")
 	}
 	return redisClient
 }
 
-func fetchItem(ctx context.Context, id int) ([]byte, error) {
-	redisClient := getRedis(ctx)
+func fetchItem(id int, ctx context.Context) ([]byte, error) {
+	redisClient := mustGetRedis(ctx)
+	reqctx := mustGetReqCtx(ctx)
 	data, err := redisClient.Get(ctx, fmt.Sprint(id)).Result()
 	if err == nil {
+		log.Debug().Msgf("Request for item %i served from cache", id)
 		return []byte(data), nil
 	}
 	req, err := retry(func() (*http.Response, error) {
-		return http.Get(base + item + fmt.Sprint(id) + ext)
-	}, 5)
+		return http.Get(BASE + ITEM + fmt.Sprint(id) + EXT)
+	}, 3)
 
 	if err != nil {
-		fmt.Println(err.Error())
+		reqctx.status = http.StatusServiceUnavailable
 		return nil, err
 	}
 	bodyBytes, err := io.ReadAll(req.Body)
 	if err != nil {
+		reqctx.status = http.StatusInternalServerError
+		log.Error().Err(err).Caller(1).Msgf("Bad response to request for %i", id)
 		return nil, err
 	}
-	redisClient.Set(ctx, fmt.Sprint(id), string(bodyBytes), 1*time.Minute)
+	redisClient.Set(ctx, fmt.Sprint(id), string(bodyBytes), 10*time.Minute)
 	return bodyBytes, nil
 }
 
-func serverError(w http.ResponseWriter, err error) {
-	switch err.Error() {
-	case "Not Found":
-		http.Error(w, "Not Found", 404)
-		return
-	case "Bad Request":
-		http.Error(w, "Bad Request", 400)
-		return
-	case "Server Error":
-		http.Error(w, "Internal Server Error", 500)
-		return
-	case "Unavailable":
-		http.Error(w, "Service Unavailable", 503)
-		return
-	default:
-		http.Error(w, "Unknown Error", 500)
-		return
-	}
-}
-
-var NotFound = errors.New("Not Found")
-var BadRequest = errors.New("Bad Request")
-var ServerError = errors.New("Server Error")
-var Unavailable = errors.New("Unavailable")
-
-func getReqId(w http.ResponseWriter, r *http.Request) int {
+func getReqId(w http.ResponseWriter, r *http.Request) (int, error) {
 	idStr := r.PathValue("id")
 	if idStr == "" {
-		serverError(w, BadRequest)
+		log.Debug().Msgf("Request without id to %s", r.RequestURI)
+		return 0, fmt.Errorf("Bad Request")
 	}
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
-		serverError(w, BadRequest)
+		log.Debug().Err(err).Msgf("Request with invalid id to %s", r.RequestURI)
+		return 0, fmt.Errorf("BadRequest")
 	}
-	return int(id)
+	return int(id), nil
 }
 
 func retry(fn func() (*http.Response, error), n int) (*http.Response, error) {
@@ -157,6 +162,7 @@ func retry(fn func() (*http.Response, error), n int) (*http.Response, error) {
 		}
 		i++
 	}
+	log.Error().Err(err).Caller().Msgf("Unable to makke response after %i attempts", n)
 	return res, err
 }
 
@@ -164,11 +170,21 @@ func shortenStories(fulls []byte) ([]byte, error) {
 	shorts := []ShortStory{}
 	err := json.Unmarshal(fulls, &shorts)
 	if err != nil {
-		return nil, ServerError
+		log.Error().Err(err).Caller().Msgf("Error unmarshaling stories")
+		return nil, fmt.Errorf("Server Error")
 	}
 	newsBytes, err := json.Marshal(shorts)
 	if err != nil {
-		return nil, ServerError
+		log.Error().Err(err).Caller().Msgf("Error marshaling stories")
+		return nil, fmt.Errorf("Server Error")
 	}
 	return newsBytes, nil
+}
+
+func mustGetEnv(key string) string {
+	val := os.Getenv(key)
+	if val == "" {
+		log.Panic().Msgf("Key %s not found in env", key)
+	}
+	return val
 }

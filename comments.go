@@ -3,20 +3,23 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"sort"
 	"sync"
+
+	"github.com/rs/zerolog/log"
 )
 
 func populateComments(ctx context.Context, ids []int) ([]Comment, error) {
 	wg := sync.WaitGroup{}
-	kids := make([]Comment,len(ids))
+	kids := make([]Comment, len(ids))
 
 	for idx, comment := range ids {
 		wg.Add(1)
 
 		go func() {
 			defer wg.Done()
-			dataI, err := fetchItem(ctx, comment)
+			dataI, err := fetchItem(comment, ctx)
 			if err != nil {
 				return
 			}
@@ -25,7 +28,7 @@ func populateComments(ctx context.Context, ids []int) ([]Comment, error) {
 			if err != nil {
 				return
 			}
-			go populateComments(ctx,res.Kids)
+			go populateComments(ctx, res.Kids)
 			kids[idx] = res
 		}()
 	}
@@ -41,22 +44,29 @@ type withKids struct {
 }
 
 func getComments(id int, ctx context.Context) ([]byte, error) {
-	itemBytes, err := fetchItem(ctx, int(id))
+	reqctx := mustGetReqCtx(ctx)
+	itemBytes, err := fetchItem(int(id), ctx)
 	if err != nil {
-		return nil, NotFound
+		return nil, err
 	}
 	item := withKids{}
 	err = json.Unmarshal(itemBytes, &item)
 	if err != nil {
-		return nil, ServerError
+		log.Error().Err(err).Caller()
+		reqctx.status = http.StatusInternalServerError
+		return nil, err
 	}
 	comments, err := populateComments(ctx, item.Kids)
 	if err != nil {
-		return nil, ServerError
+		log.Error().Err(err).Caller()
+		reqctx.status = http.StatusInternalServerError
+		return nil, err
 	}
 	commentsBytes, err := json.Marshal(comments)
 	if err != nil {
-		return nil, ServerError
+		log.Error().Err(err).Caller()
+		reqctx.status = http.StatusInternalServerError
+		return nil, err
 	}
 	return commentsBytes, nil
 }
