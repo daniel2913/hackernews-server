@@ -54,7 +54,7 @@ func main() {
 	}
 	log.Info().Msg("Connected to redis database")
 
-	server := http.Server{Addr: "localhost:3005"}
+	server := http.Server{Addr: mustGetEnv("ADDRES")}
 
 	paths := []string{"newstories", "topstories", "beststories"}
 	generateHandlers(paths, ctx)
